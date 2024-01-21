@@ -1,1 +1,2 @@
-baseURL = 'https://kb.w.jw4.us/'
+baseURL = 'https://kb-staging.jw4.us/'
+buildDrafts = true
