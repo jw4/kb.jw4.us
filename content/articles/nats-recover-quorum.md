@@ -5,6 +5,8 @@ draft = false
 tags = ["NATS", "Helm", "Kubernetes", "Troubleshooting"]
 +++
 
+# Recovering Quorum After Renaming Nodes
+
 Occassionally a NATS cluster can lose quorum for various reasons.
 Here, we'll look at one specific case, and how to recover from it.
 
