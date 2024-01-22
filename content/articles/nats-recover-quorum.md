@@ -1,8 +1,9 @@
 +++
 title = 'NATS :: Recovering Quorum After Renaming Nodes'
 date = 2024-01-20T19:35:31-07:00
-draft = false
-tags = ["NATS", "Helm", "Kubernetes", "Troubleshooting"]
+author = "John Weldon"
+categories = ["Engineering"]
+tags = ["nats", "helm", "kubernetes", "troubleshooting"]
 +++
 
 # Recovering Quorum After Renaming Nodes
@@ -14,19 +15,36 @@ Here, we'll look at one specific case, and how to recover from it.
 
 ## Context
 
-In the situation where you try to rename the nodes of the cluster in bulk
-(instead of one-by-one),
-the cluster will end up configured with double the number of nodes,
-with only half of them responding.
+### How To Rename Servers In A Cluster
 
-For the sake of this article we'll assume the cluster should have 3 nodes,
-and, after renaming the nodes, the cluster now expects 6 nodes;
-3 with the original names, and 3 with the new names.
+The recommended way to rename NATS servers in a cluster, is to rename one at a time.
+After each rename, the cluster will have a record of both the old name and the new name.
+The former will appear offline, and the latter should appear online.
+You should remove the record of the old name before renaming the next server, otherwise the
+cluster may, sooner or later, end up with too many faux-offline servers, and will consider
+itself to have lost quorum.
 
-Also, the helm release name in this article is `nats-helm-kind`,
-which could be simply `nats`, or whatever your release name is.
+#### NATS Helm Chart Caveats - _A Brief Diversion_
 
-## Indication of Trouble
+The [`values.yaml`][values.yaml] file for the [NATS Helm Chart][helm-chart] has an option
+to set a [`serverNamePrefix`][serverNamePrefix], which you might be tempted to use to
+rename the servers in a helm chart deployed cluster.
+
+This setting should only be changed before the first installation.
+Once the cluster is up and running, if you change this value, and then upgrade the
+helm release, you'll cause all of the servers in the cluster to be simultaneously renamed.
+This will double the number of recorded servers in the cluster (half with the old name, and
+half with the new name, per the changed `serverNamePrefix`).
+Consequently, there will not be enough servers active in the cluster to retain quorum.
+
+### A Case Study
+
+For the sake of this article we'll assume a helm chart [^chart-name] deployed cluster of three servers. [^kind-repo]
+
+We start by "breaking" this cluster, simply modifying the `serverNamePrefix` to rename the
+servers, and the update the release.
+
+## First Indication of Trouble
 
 ### Logs
 
@@ -40,7 +58,7 @@ The first indication of trouble is when you see this `WRN` warning and `INF` mes
 ### Events
 
 Another indication is that the NATS pods fail to progress to a ready state;
-the nats container specifically shows that it's running, but ready == false.
+the nats container specifically shows that it's running, but the readiness is false.
 
 The events will show a warning with the message
 
@@ -50,14 +68,15 @@ Readiness probe failed: HTTP probe failed with statuscode: 503
 
 ### NATS CLI
 
-Using the NATS cli, running the `nats server report jetstream` will also show an error.
+Using the NATS cli, running the `nats server report jetstream` will also show an error;
+depending on the cluster state it could be any one of the following:
 
 #### Before Quorum Is Lost
 
-At first, you'll just see half the nodes (with the old name) as being offline:
+At first, you'll just see half the servers (with the old name) as being offline:
 
 ```sh
-$ kubectl exec -it deployment/nats-helm-kind-box -- nats server report jetstream
+$ nats server report jetstream
 ╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                 JetStream Summary                                                 │
 ├─────────────────────┬────────────────┬─────────┬───────────┬──────────┬───────┬────────┬──────┬─────────┬─────────┤
@@ -87,11 +106,11 @@ $ kubectl exec -it deployment/nats-helm-kind-box -- nats server report jetstream
 
 #### After Quorum Is Lost
 
-After the quorum is lost, but before the readiness probes cause the nodes to stop responding,
+After the quorum is lost, but before the readiness probes cause the servers to stop responding,
 for a brief window of time you'll see the error in the jetstream report:
 
 ```sh
-$ kubectl exec -it deployment/nats-helm-kind-box -- nats server report jetstream
+$ nats server report jetstream
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                 JetStream Summary                                                │
 ├────────────────────┬────────────────┬─────────┬───────────┬──────────┬───────┬────────┬──────┬─────────┬─────────┤
@@ -109,25 +128,25 @@ WARNING: No cluster meta leader found. The cluster expects 6 nodes but only 3 re
 
 ```
 
-#### After Nodes Stop Responding
+#### After Servers Stop Responding
 
-Finally, the nodes will possibly stop responding, giving you the general error:
+Finally, the servers will possibly stop responding, giving you the general error:
 
 ```sh
-$ kubectl exec -it deployment/nats-helm-kind-box -- nats server report jetstream
+$ nats server report jetstream
 nats: error: nats: no servers available for connection
 command terminated with exit code 1
 ```
 
-## Recovery
+## How To Recover
 
 ### Regain Quorum
 
 To recover, the cluster must first regain quorum.
-In this case the cluster thinks that there are six nodes in the cluster,
-so to regain quorum there needs to be a minimum of four nodes reachable from each other.
+In this case the cluster thinks that there are six nodes [^nodes] in the cluster,
+so to regain quorum there needs to be a minimum of four nodes [^nodes] reachable from each other.
 
-The way to do this is to add one more node, which will allow quorum to be regained.
+The way to do this is to add one more server, which will allow quorum to be regained.
 You can do this by scaling the stateful set:
 
 ```sh
@@ -137,7 +156,7 @@ $ kubectl scale --replicas=4 statefulset/nats-helm-kind
 Which, once complete, should result in quorum being regained:
 
 ```sh
-$ kubectl exec -it deployment/nats-helm-kind-box -- nats server report jetstream
+$ nats server report jetstream
 ╭───────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                                                 JetStream Summary                                                 │
 ├─────────────────────┬────────────────┬─────────┬───────────┬──────────┬───────┬────────┬──────┬─────────┬─────────┤
@@ -167,16 +186,17 @@ $ kubectl exec -it deployment/nats-helm-kind-box -- nats server report jetstream
 
 ```
 
-### Remove Offline/Old Nodes
+### Remove Offline/Old Servers
 
-You can do this either with the CLI, or using NATS directly.
+Now you can begin cleaning up the old server records.
+You can do this either with the CLI, or using by NATS directly.
 
 #### CLI
 
-Now you can remove the old node names, one by one, using the NATS cli:
+Using the CLI [^kubectl-exec]:
 
 ```sh
-$ kubectl exec -it deployment/nats-helm-kind-box -- nats server cluster peer-remove -f <peer ID>
+$ nats server cluster peer-remove -f <peer ID>
 ```
 
 #### Using NATS Directly
@@ -184,7 +204,7 @@ $ kubectl exec -it deployment/nats-helm-kind-box -- nats server cluster peer-rem
 You can also remove a peer directly by publishing to the JetStream API subjects:
 
 ```sh
-$ kubectl exec -it deployment/nats-helm-kind-box -- nats publish '$JS.API.SERVER.REMOVE' '{"peer":"","peer_id":"YMpQSy04"}'
+$ nats publish '$JS.API.SERVER.REMOVE' '{"peer":"","peer_id":"YMpQSy04"}'
 ```
 
 Which will send a response message on the same channel that confirms the action:
@@ -198,10 +218,10 @@ Which will send a response message on the same channel that confirms the action:
 
 ### Remove Temporarily Added Server
 
-#### Scale Back Down To 3 Servers
+#### Scale Back Down To Three Servers
 
-Now that the number of nodes is now 4 instead of 6, it's now safe to scale back down to 3 nodes,
-and then remove the node we temporarily added.
+Now that the number of servers is four instead of six, it's safe to scale back down to three servers,
+and then remove the record of the server we temporarily added.
 
 ```sh
 $ kubectl scale --replicas=3 statefulset/nats-helm-kind
@@ -210,9 +230,27 @@ $ kubectl scale --replicas=3 statefulset/nats-helm-kind
 #### Remove Peer
 
 ```sh
-$ kubectl exec -it deployment/nats-helm-kind-box -- nats server cluster peer-remove -f G7oD67bf
+$ nats server cluster peer-remove -f G7oD67bf
 ```
 
 ### Success!
 
-Finally, the state of the cluster should be restored now, with three nodes.
+Finally, the state of the cluster should be restored now, with three servers.
+
+[^chart-name]: The name of the helm release in this article is `nats-helm-kind`; it could be anything, often the default is just `nats`
+[^kind-repo]: You can replicate the [kind][] environment I used in this article, by referring to [this][nats-helm-kind-playground] repository.
+[^kubectl-exec]:
+    Throughout this article I use nats-box to execute nats commands; the simple way to do it from the command line is:
+    `kubectl exec -it deployment/nats-helm-kind-box -- nats <command> <args>`
+
+    nats-box is deployed by default in the nats helm chart.
+
+    For simplicity I'll just show the plain NATS command in the examples.
+
+[^nodes]: NATS Servers are also called "nodes" - sometimes interchangeably.
+
+[helm-chart]: https://github.com/nats-io/k8s/blob/main/helm/charts/nats/README.md "HELM Chart README"
+[values.yaml]: https://github.com/nats-io/k8s/blob/main/helm/charts/nats/values.yaml "default values.yaml"
+[serverNamePrefix]: https://github.com/nats-io/k8s/blob/2ce9a408f17b823d51223e04e806b73cead51993/helm/charts/nats/values.yaml#L273 "in the default values.yaml"
+[kind]: https://kind.sigs.k8s.io/ "kind is a tool for running local kubernetes clusters using docker"
+[nats-helm-kind-playground]: https://github.com/johnweldon/nats-helm-kind-playground "scripts and config to quickly stand up a nats cluster on kind"
